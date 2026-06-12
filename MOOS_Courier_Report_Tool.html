@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MOOS  DPD Hamburg Günlük Kurye Raporu</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f4f5f7; color: #1a1a1a; min-height: 100vh; }
+  .container { max-width: 760px; margin: 0 auto; padding: 32px 20px; }
+  .header { margin-bottom: 28px; }
+  .header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; color: #111; }
+  .header p { font-size: 13px; color: #777; margin-top: 4px; }
+  .dropzone {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 2px dashed #c5c9d1; border-radius: 14px; padding: 60px 24px;
+    cursor: pointer; transition: all 0.2s; background: #fff;
+  }
+  .dropzone:hover, .dropzone.drag-over { border-color: #2563eb; background: rgba(37,99,235,0.03); }
+  .dropzone .icon { font-size: 42px; margin-bottom: 12px; opacity: 0.45; }
+  .dropzone .label { font-size: 15px; font-weight: 600; color: #222; }
+  .dropzone .hint { font-size: 12px; color: #999; margin-top: 6px; }
+  .dropzone input { display: none; }
+  .error { margin-top: 16px; padding: 10px 16px; background: #fef2f2; color: #b91c1c; border-radius: 8px; font-size: 13px; }
+  .stats { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat { flex: 1 1 110px; padding: 10px 14px; background: #fff; border-radius: 8px; min-width: 100px; border: 1px solid #e5e7eb; }
+  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: #888; font-weight: 700; }
+  .stat-value { font-size: 18px; font-weight: 700; color: #111; margin-top: 2px; }
+  .actions { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
+  .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn-green { background: #16a34a; color: #fff; }
+  .btn-gray { background: #e5e7eb; color: #333; }
+  .courier-block { margin-bottom: 12px; background: #fff; border-radius: 10px; overflow: hidden; border: 1px solid #e5e7eb; }
+  .courier-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; background: #f8f9fa; border-bottom: 2px solid #e5e7eb;
+    cursor: pointer; user-select: none;
+  }
+  .courier-header.collapsed { border-bottom: none; }
+  .courier-header .name { font-size: 14px; font-weight: 700; color: #111; }
+  .courier-header .total { font-size: 12px; color: #666; font-weight: 600; }
+  .courier-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .courier-table thead td {
+    padding: 6px 14px; font-weight: 600; color: #888; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.4px; border-bottom: 1px solid #ddd;
+  }
+  .courier-table tbody tr { border-bottom: 1px solid #f0f0f0; }
+  .courier-table tbody tr:last-child { border-bottom: none; }
+  .courier-table tbody tr:nth-child(even) { background: #fafbfc; }
+  .courier-table td { padding: 7px 14px; }
+  .courier-table td.num { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; color: #111; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>MOOS  DPD Hamburg Günlük Kurye Raporu</h1>
+    <p>Otomasyon ömür uzatır...</p>
+  </div>
+
+  <div id="upload-area">
+    <label class="dropzone" id="dropzone">
+      <input type="file" id="file-input" accept=".xlsx,.xls">
+      <div class="icon">📂</div>
+      <div class="label">.xlsx dosyanızı buraya bırakın veya tıklayarak seçin</div>
+      <div class="hint">THE_MOOS_*.xlsx</div>
+    </label>
+    <div id="error-msg" class="error hidden"></div>
+  </div>
+
+  <div id="results-area" class="hidden">
+    <div class="stats" id="stats-bar"></div>
+    <div class="actions">
+      <button class="btn btn-green" id="btn-download">⬇ Excel İndir</button>
+      <button class="btn btn-gray" id="btn-reset">Yeni dosya</button>
+    </div>
+    <div id="courier-results"></div>
+  </div>
+</div>
+
+<script>
+const VALID_STATUSES = ["DELIVERED", "DELIVERED_TO_PUDO", "DELIVERY"];
+
+function fmtDate(serial) {
+  if (!serial) return "";
+  if (typeof serial === "string") return serial;
+  const d = new Date(Math.floor(serial - 25569) * 86400000);
+  return String(d.getUTCDate()).padStart(2,"0") + "." +
+         String(d.getUTCMonth()+1).padStart(2,"0") + "." + d.getUTCFullYear();
+}
+
+let currentResults = null;
+let currentMeta = null;
+
+function showError(msg) {
+  const el = document.getElementById("error-msg");
+  el.textContent = msg; el.classList.remove("hidden");
+}
+
+function processFile(file) {
+  document.getElementById("error-msg").classList.add("hidden");
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws);
+
+      if (!rows.length) { showError("Dosya boş."); return; }
+      const cols = Object.keys(rows[0]);
+      if (!cols.includes("delivery_status") || !cols.includes("tour") ||
+          !cols.includes("courier_name") || !cols.includes("scan_date")) {
+        showError("Gerekli sütunlar eksik: delivery_status, tour, courier_name, scan_date"); return;
+      }
+
+      const filtered = rows.filter(r => VALID_STATUSES.includes(r.delivery_status));
+      const map = {};
+      filtered.forEach(r => {
+        const name = r.courier_name || "Bilinmeyen";
+        const dateStr = fmtDate(r.scan_date);
+        const tour = String(r.tour);
+        if (!map[name]) map[name] = {};
+        const key = tour + "|" + dateStr;
+        if (!map[name][key]) map[name][key] = { tour, date: dateStr, count: 0, raw: r.scan_date };
+        map[name][key].count++;
+      });
+
+      const resultData = Object.entries(map)
+        .sort(([a],[b]) => a.localeCompare(b))
+        .map(([name, obj]) => {
+          const entries = Object.values(obj).sort((a,b) => {
+            if (a.tour !== b.tour) return Number(a.tour) - Number(b.tour);
+            return a.raw - b.raw;
+          });
+          return { name, entries, total: entries.reduce((s,e) => s + e.count, 0) };
+        });
+
+      currentResults = resultData;
+      currentMeta = {
+        filteredRows: filtered.length,
+        excluded: rows.length - filtered.length,
+        couriers: resultData.length,
+        grandTotal: filtered.length
+      };
+      renderResults();
+    } catch(err) {
+      showError("Bu dosya işlenemedi. Geçerli bir .xlsx dosyası olduğundan emin olun.");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function renderResults() {
+  const m = currentMeta;
+  document.getElementById("upload-area").classList.add("hidden");
+  document.getElementById("results-area").classList.remove("hidden");
+
+  document.getElementById("stats-bar").innerHTML = [
+    { label: "Filtrelenen", value: m.filteredRows.toLocaleString() },
+    { label: "Hariç tutulan", value: m.excluded.toLocaleString() },
+    { label: "Kuryeler", value: m.couriers },
+    { label: "Toplam teslimat", value: m.grandTotal.toLocaleString() },
+  ].map(s => `<div class="stat"><div class="stat-label">${s.label}</div><div class="stat-value">${s.value}</div></div>`).join("");
+
+  document.getElementById("courier-results").innerHTML = currentResults.map((c, idx) => `
+    <div class="courier-block">
+      <div class="courier-header" onclick="toggleCourier(${idx})" id="ch-${idx}">
+        <span class="name"><span id="arrow-${idx}">▾</span> ${c.name}</span>
+        <span class="total">${c.total} teslimat</span>
+      </div>
+      <div id="ct-${idx}">
+        <table class="courier-table">
+          <thead><tr><td>Tur</td><td>Tarama Tarihi</td><td style="text-align:right">Adet</td></tr></thead>
+          <tbody>${c.entries.map(e =>
+            `<tr><td>${e.tour}</td><td>${e.date}</td><td class="num">${e.count}</td></tr>`
+          ).join("")}</tbody>
+        </table>
+      </div>
+    </div>
+  `).join("");
+}
+
+function toggleCourier(idx) {
+  const ct = document.getElementById("ct-" + idx);
+  const ch = document.getElementById("ch-" + idx);
+  const arrow = document.getElementById("arrow-" + idx);
+  const hidden = ct.style.display === "none";
+  ct.style.display = hidden ? "" : "none";
+  ch.classList.toggle("collapsed", !hidden);
+  arrow.textContent = hidden ? "▾" : "▸";
+}
+
+function downloadExcel() {
+  if (!currentResults) return;
+  const rows = [];
+  currentResults.forEach(c => {
+    c.entries.forEach(e => {
+      rows.push({ courier_name: c.name, tour: Number(e.tour), scan_date: e.date, count: e.count });
+    });
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws["!cols"] = [{ wch: 28 }, { wch: 8 }, { wch: 14 }, { wch: 8 }];
+  const totals = [];
+  currentResults.forEach(c => {
+    const tourMap = {};
+    c.entries.forEach(e => { tourMap[e.tour] = (tourMap[e.tour] || 0) + e.count; });
+    Object.entries(tourMap).sort(([a],[b]) => Number(a) - Number(b)).forEach(([tour, count]) => {
+      totals.push({ courier_name: c.name, tour: Number(tour), count });
+    });
+  });
+  const ws2 = XLSX.utils.json_to_sheet(totals);
+  ws2["!cols"] = [{ wch: 28 }, { wch: 8 }, { wch: 8 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Özet");
+  XLSX.utils.book_append_sheet(wb, ws2, "Tur Toplamları");
+  XLSX.writeFile(wb, "kurye_raporu.xlsx");
+}
+
+function resetTool() {
+  currentResults = null; currentMeta = null;
+  document.getElementById("results-area").classList.add("hidden");
+  document.getElementById("upload-area").classList.remove("hidden");
+  document.getElementById("error-msg").classList.add("hidden");
+  document.getElementById("file-input").value = "";
+}
+
+const dz = document.getElementById("dropzone");
+dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag-over"); });
+dz.addEventListener("dragleave", () => dz.classList.remove("drag-over"));
+dz.addEventListener("drop", e => { e.preventDefault(); dz.classList.remove("drag-over"); if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]); });
+document.getElementById("file-input").addEventListener("change", e => { if (e.target.files[0]) processFile(e.target.files[0]); });
+document.getElementById("btn-download").addEventListener("click", downloadExcel);
+document.getElementById("btn-reset").addEventListener("click", resetTool);
+</script>
+</body>
+</html>
